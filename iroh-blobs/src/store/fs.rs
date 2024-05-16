@@ -1099,7 +1099,6 @@ impl StoreInner {
     }
 
     fn import_bytes_sync(&self, data: Bytes, format: BlobFormat) -> OuterResult<TempTag> {
-        let id = 0;
         let file = ImportSource::Memory(data);
         let progress = IgnoreProgressSender::default();
         let (tag, _size) = self.finalize_import_sync(file, format, progress)?;
@@ -1370,14 +1369,8 @@ impl super::Store for Store {
         progress: impl ProgressSender<Msg = ImportProgress> + IdGenerator,
     ) -> io::Result<(TempTag, u64)> {
         let this = self.clone();
-        let id = progress.new_id();
         // write to a temp file
         let temp_data_path = this.0.temp_file_name();
-        let name = temp_data_path
-            .file_name()
-            .expect("just created")
-            .to_string_lossy()
-            .to_string();
         let mut writer = tokio::fs::File::create(&temp_data_path).await?;
         let mut offset = 0;
         while let Some(chunk) = data.next().await {

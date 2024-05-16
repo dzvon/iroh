@@ -117,8 +117,6 @@ pub struct TransferStats {
 pub enum AddProgress {
     /// An item was found with name `name`, from now on referred to via `id`
     Found {
-        /// The name of the entry.
-        name: String,
         /// The size of the entry in bytes.
         size: u64,
     },

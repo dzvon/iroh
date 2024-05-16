@@ -1,8 +1,5 @@
 use std::{
-    cell::RefCell,
-    collections::BTreeMap,
     path::{Path, PathBuf},
-    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -18,7 +15,7 @@ use tokio::io::AsyncReadExt;
 
 use iroh::{
     base::{base32::fmt_short, node_addr::AddrInfoOptions},
-    blobs::{provider::AddProgress, util::SetTagOption, Hash, Tag},
+    blobs::{provider::AddProgress, util::SetTagOption, Tag},
     client::{
         blobs::WrapOption,
         docs::{Doc, Entry, LiveEvent, Origin, ShareMode},
@@ -793,13 +790,10 @@ where
     );
     let task_imp = imp.clone();
 
-    let collections = Rc::new(RefCell::new(BTreeMap::<
-        u64,
-        (String, u64, Option<Hash>, u64),
-    >::new()));
-
     let doc2 = doc.clone();
     let imp2 = task_imp.clone();
+    let mut fsize = 0u64;
+    let mut rhash = None;
 
     let _stats: Vec<_> = blob_add_progress
         .filter_map(|item| {
@@ -808,30 +802,24 @@ where
                 Ok(item) => item,
             };
             match item {
-                AddProgress::Found { name, size } => {
-                    tracing::info!("Found({name},{size})");
-                    imp.add_found(name.clone(), size);
-                    collections.borrow_mut().insert(0, (name, size, None, 0));
+                AddProgress::Found { size } => {
+                    tracing::info!("Found({size})");
+                    fsize = size;
+                    imp.add_found("".to_string(), size);
                     None
                 }
                 AddProgress::Progress { offset } => {
                     tracing::info!("Progress({offset})");
-                    if let Some((_, size, _, last_val)) = collections.borrow_mut().get_mut(&0) {
-                        assert!(*last_val <= offset, "wtf");
-                        assert!(offset <= *size, "wtf2");
-                        imp.add_progress(offset - *last_val);
-                        *last_val = offset;
-                    }
+                    imp.set_add_progress(offset);
                     None
                 }
                 AddProgress::Done { hash } => {
                     tracing::info!("Done({hash:?})");
-                    match collections.borrow_mut().get_mut(&0) {
-                        Some((path_str, size, ref mut h, last_val)) => {
-                            imp.add_progress(*size - *last_val);
-                            imp.import_found(path_str.clone());
-                            let path = PathBuf::from(path_str.clone());
-                            *h = Some(hash);
+                            imp.set_add_progress(fsize);
+                            imp.import_found("".to_string());
+                            rhash = Some(hash);
+                            let path = root.join(&prefix);
+                            let path_str = path.display().to_string();
                             let key =
                                 match path_to_key(path, Some(prefix.clone()), Some(root.clone())) {
                                     Ok(k) => k.to_vec(),
@@ -847,17 +835,7 @@ where
                                 "setting entry {} to doc",
                                 String::from_utf8(key.clone()).unwrap()
                             );
-                            Some(Ok((key, hash, *size)))
-                        }
-                        None => {
-                            tracing::info!(
-                                "error: got `AddProgress::Done` for unknown collection id"
-                            );
-                            Some(Err(anyhow::anyhow!(
-                                "Received progress information on an unknown file."
-                            )))
-                        }
-                    }
+                            Some(Ok((key, hash, fsize)))
                 }
                 AddProgress::AllDone { hash, .. } => {
                     imp.add_done();
@@ -929,8 +907,8 @@ impl ImportProgressBar {
 
     fn import_found(&self, _name: String) {}
 
-    fn add_progress(&self, size: u64) {
-        self.add.inc(size);
+    fn set_add_progress(&self, offset: u64) {
+        self.add.set_position(offset);
     }
 
     fn import_progress(&self) {

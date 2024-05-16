@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Result};
@@ -650,13 +650,9 @@ impl<D: BaoStore> Handler<D> {
         use iroh_blobs::store::ImportMode;
 
         let progress = FlumeProgressSender::new(progress);
-        let name = msg.path.display().to_string();
         // convert import progress to provide progress
         let import_progress = progress.clone().with_filter_map(move |x| match x {
-            ImportProgress::Size { size } => Some(AddProgress::Found {
-                name: name.clone(),
-                size,
-            }),
+            ImportProgress::Size { size } => Some(AddProgress::Found { size }),
             ImportProgress::OutboardProgress { offset } => Some(AddProgress::Progress { offset }),
             ImportProgress::OutboardDone { hash } => Some(AddProgress::Done { hash }),
             _ => None,
@@ -853,12 +849,8 @@ impl<D: BaoStore> Handler<D> {
             }
         });
 
-        let name = "stream";
         let import_progress = progress.clone().with_filter_map(move |x| match x {
-            ImportProgress::Size { size } => Some(AddProgress::Found {
-                name: name.to_string(),
-                size,
-            }),
+            ImportProgress::Size { size } => Some(AddProgress::Found { size }),
             ImportProgress::OutboardProgress { offset } => Some(AddProgress::Progress { offset }),
             ImportProgress::OutboardDone { hash } => Some(AddProgress::Done { hash }),
             _ => None,

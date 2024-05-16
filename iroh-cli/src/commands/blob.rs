@@ -903,12 +903,11 @@ pub async fn aggregate_add_response(
     let mut mp = Some(ProvideProgressState::new());
     while let Some(item) = stream.next().await {
         match item? {
-            AddProgress::Found { name, size } => {
-                tracing::trace!("Found({name},{size})");
+            AddProgress::Found { size } => {
+                tracing::trace!("Found({size})");
                 if let Some(mp) = mp.as_mut() {
-                    mp.found(name.clone(), 0, size);
+                    mp.found("".to_string(), 0, size);
                 }
-                collections.insert(0, (name, size, None));
             }
             AddProgress::Progress { offset } => {
                 tracing::trace!("Progress({offset})");

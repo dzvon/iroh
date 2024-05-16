@@ -29,7 +29,7 @@ use crate::{
 };
 
 use super::{
-    temp_name, BaoBatchWriter, ConsistencyCheckProgress, ExportMode, ExportProgressCb, ImportMode,
+    BaoBatchWriter, ConsistencyCheckProgress, ExportMode, ExportProgressCb, ImportMode,
     ImportProgress, Map, TempCounterMap,
 };
 
@@ -165,7 +165,6 @@ impl super::Store for Store {
         progress: impl ProgressSender<Msg = ImportProgress> + IdGenerator,
     ) -> io::Result<(TempTag, u64)> {
         let this = self.clone();
-        let name = temp_name();
         let mut bytes = BytesMut::new();
         while let Some(chunk) = data.next().await {
             bytes.extend_from_slice(&chunk?);
