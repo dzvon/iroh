@@ -1071,11 +1071,6 @@ impl StoreInner {
             )
             .into());
         }
-        let id = progress.new_id();
-        progress.blocking_send(ImportProgress::Found {
-            id,
-            name: path.to_string_lossy().to_string(),
-        })?;
         let file = match mode {
             ImportMode::TryReference => ImportSource::External(path),
             ImportMode::Copy => {
@@ -1088,7 +1083,7 @@ impl StoreInner {
                 } else {
                     let temp_path = self.temp_file_name();
                     // copy the data, since it is not stable
-                    progress.try_send(ImportProgress::CopyProgress { id, offset: 0 })?;
+                    progress.try_send(ImportProgress::CopyProgress { offset: 0 })?;
                     if reflink_copy::reflink_or_copy(&path, &temp_path)?.is_none() {
                         tracing::debug!("reflinked {} to {}", path.display(), temp_path.display());
                     } else {
@@ -1099,15 +1094,14 @@ impl StoreInner {
                 }
             }
         };
-        let (tag, size) = self.finalize_import_sync(file, format, id, progress)?;
+        let (tag, size) = self.finalize_import_sync(file, format, progress)?;
         Ok((tag, size))
     }
 
     fn import_bytes_sync(&self, data: Bytes, format: BlobFormat) -> OuterResult<TempTag> {
-        let id = 0;
         let file = ImportSource::Memory(data);
         let progress = IgnoreProgressSender::default();
-        let (tag, _size) = self.finalize_import_sync(file, format, id, progress)?;
+        let (tag, _size) = self.finalize_import_sync(file, format, progress)?;
         Ok(tag)
     }
 
@@ -1115,15 +1109,11 @@ impl StoreInner {
         &self,
         file: ImportSource,
         format: BlobFormat,
-        id: u64,
         progress: impl ProgressSender<Msg = ImportProgress> + IdGenerator,
     ) -> OuterResult<(TempTag, u64)> {
         let data_size = file.len()?;
         tracing::debug!("finalize_import_sync {:?} {}", file, data_size);
-        progress.blocking_send(ImportProgress::Size {
-            id,
-            size: data_size,
-        })?;
+        progress.blocking_send(ImportProgress::Size { size: data_size })?;
         let progress2 = progress.clone();
         let (hash, outboard) = match file.content() {
             MemOrFile::File(path) => {
@@ -1131,7 +1121,7 @@ impl StoreInner {
                 let _guard = span.enter();
                 let file = std::fs::File::open(path)?;
                 compute_outboard(file, data_size, move |offset| {
-                    Ok(progress2.try_send(ImportProgress::OutboardProgress { id, offset })?)
+                    Ok(progress2.try_send(ImportProgress::OutboardProgress { offset })?)
                 })?
             }
             MemOrFile::Mem(bytes) => {
@@ -1139,7 +1129,7 @@ impl StoreInner {
                 compute_outboard(bytes, data_size, |_| Ok(()))?
             }
         };
-        progress.blocking_send(ImportProgress::OutboardDone { id, hash })?;
+        progress.blocking_send(ImportProgress::OutboardDone { hash })?;
         // from here on, everything related to the hash is protected by the temp tag
         let tag = self.temp_tag(HashAndFormat { hash, format });
         let hash = *tag.hash();
@@ -1379,30 +1369,25 @@ impl super::Store for Store {
         progress: impl ProgressSender<Msg = ImportProgress> + IdGenerator,
     ) -> io::Result<(TempTag, u64)> {
         let this = self.clone();
-        let id = progress.new_id();
         // write to a temp file
         let temp_data_path = this.0.temp_file_name();
-        let name = temp_data_path
-            .file_name()
-            .expect("just created")
-            .to_string_lossy()
-            .to_string();
-        progress.send(ImportProgress::Found { id, name }).await?;
         let mut writer = tokio::fs::File::create(&temp_data_path).await?;
         let mut offset = 0;
         while let Some(chunk) = data.next().await {
             let chunk = chunk?;
             writer.write_all(&chunk).await?;
             offset += chunk.len() as u64;
-            progress.try_send(ImportProgress::CopyProgress { id, offset })?;
+            progress.try_send(ImportProgress::CopyProgress { offset })?;
         }
         writer.flush().await?;
         drop(writer);
         let file = ImportSource::TempFile(temp_data_path);
-        Ok(tokio::task::spawn_blocking(move || {
-            this.0.finalize_import_sync(file, format, id, progress)
-        })
-        .await??)
+        Ok(
+            tokio::task::spawn_blocking(move || {
+                this.0.finalize_import_sync(file, format, progress)
+            })
+            .await??,
+        )
     }
 
     async fn set_tag(&self, name: Tag, hash: Option<HashAndFormat>) -> io::Result<()> {

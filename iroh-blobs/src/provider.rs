@@ -117,24 +117,16 @@ pub struct TransferStats {
 pub enum AddProgress {
     /// An item was found with name `name`, from now on referred to via `id`
     Found {
-        /// A new unique id for this entry.
-        id: u64,
-        /// The name of the entry.
-        name: String,
         /// The size of the entry in bytes.
         size: u64,
     },
     /// We got progress ingesting item `id`.
     Progress {
-        /// The unique id of the entry.
-        id: u64,
         /// The offset of the progress, in bytes.
         offset: u64,
     },
     /// We are done with `id`, and the hash is `hash`.
     Done {
-        /// The unique id of the entry.
-        id: u64,
         /// The hash of the entry.
         hash: Hash,
     },

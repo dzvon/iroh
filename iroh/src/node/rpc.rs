@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Result};
@@ -502,26 +502,19 @@ impl<D: BaoStore> Handler<D> {
     ) -> anyhow::Result<()> {
         use crate::client::docs::ImportProgress as DocImportProgress;
         use iroh_blobs::store::ImportMode;
-        use std::collections::BTreeMap;
 
         let progress = FlumeProgressSender::new(progress);
-        let names = Arc::new(Mutex::new(BTreeMap::new()));
         // convert import progress to provide progress
+        let name = msg.path.display().to_string();
         let import_progress = progress.clone().with_filter_map(move |x| match x {
-            ImportProgress::Found { id, name } => {
-                names.lock().unwrap().insert(id, name);
-                None
+            ImportProgress::Size { size } => Some(DocImportProgress::Found {
+                name: name.clone(),
+                size,
+            }),
+            ImportProgress::OutboardProgress { offset } => {
+                Some(DocImportProgress::Progress { offset })
             }
-            ImportProgress::Size { id, size } => {
-                let name = names.lock().unwrap().remove(&id)?;
-                Some(DocImportProgress::Found { id, name, size })
-            }
-            ImportProgress::OutboardProgress { id, offset } => {
-                Some(DocImportProgress::Progress { id, offset })
-            }
-            ImportProgress::OutboardDone { hash, id } => {
-                Some(DocImportProgress::IngestDone { hash, id })
-            }
+            ImportProgress::OutboardDone { hash } => Some(DocImportProgress::IngestDone { hash }),
             _ => None,
         });
         let DocImportFileRequest {
@@ -654,24 +647,13 @@ impl<D: BaoStore> Handler<D> {
         progress: flume::Sender<AddProgress>,
     ) -> anyhow::Result<()> {
         use iroh_blobs::store::ImportMode;
-        use std::collections::BTreeMap;
 
         let progress = FlumeProgressSender::new(progress);
-        let names = Arc::new(Mutex::new(BTreeMap::new()));
         // convert import progress to provide progress
         let import_progress = progress.clone().with_filter_map(move |x| match x {
-            ImportProgress::Found { id, name } => {
-                names.lock().unwrap().insert(id, name);
-                None
-            }
-            ImportProgress::Size { id, size } => {
-                let name = names.lock().unwrap().remove(&id)?;
-                Some(AddProgress::Found { id, name, size })
-            }
-            ImportProgress::OutboardProgress { id, offset } => {
-                Some(AddProgress::Progress { id, offset })
-            }
-            ImportProgress::OutboardDone { hash, id } => Some(AddProgress::Done { hash, id }),
+            ImportProgress::Size { size } => Some(AddProgress::Found { size }),
+            ImportProgress::OutboardProgress { offset } => Some(AddProgress::Progress { offset }),
+            ImportProgress::OutboardDone { hash } => Some(AddProgress::Done { hash }),
             _ => None,
         });
         let BlobAddPathRequest {
@@ -903,20 +885,10 @@ impl<D: BaoStore> Handler<D> {
             }
         });
 
-        let name_cache = Arc::new(Mutex::new(None));
         let import_progress = progress.clone().with_filter_map(move |x| match x {
-            ImportProgress::Found { id: _, name } => {
-                let _ = name_cache.lock().unwrap().insert(name);
-                None
-            }
-            ImportProgress::Size { id, size } => {
-                let name = name_cache.lock().unwrap().take()?;
-                Some(AddProgress::Found { id, name, size })
-            }
-            ImportProgress::OutboardProgress { id, offset } => {
-                Some(AddProgress::Progress { id, offset })
-            }
-            ImportProgress::OutboardDone { hash, id } => Some(AddProgress::Done { hash, id }),
+            ImportProgress::Size { size } => Some(AddProgress::Found { size }),
+            ImportProgress::OutboardProgress { offset } => Some(AddProgress::Progress { offset }),
+            ImportProgress::OutboardDone { hash } => Some(AddProgress::Done { hash }),
             _ => None,
         });
         let (temp_tag, _len) = self

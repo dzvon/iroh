@@ -903,30 +903,29 @@ pub async fn aggregate_add_response(
     let mut mp = Some(ProvideProgressState::new());
     while let Some(item) = stream.next().await {
         match item? {
-            AddProgress::Found { name, id, size } => {
-                tracing::trace!("Found({id},{name},{size})");
+            AddProgress::Found { size } => {
+                tracing::trace!("Found({size})");
                 if let Some(mp) = mp.as_mut() {
-                    mp.found(name.clone(), id, size);
-                }
-                collections.insert(id, (name, size, None));
-            }
-            AddProgress::Progress { id, offset } => {
-                tracing::trace!("Progress({id}, {offset})");
-                if let Some(mp) = mp.as_mut() {
-                    mp.progress(id, offset);
+                    mp.found("".to_string(), 0, size);
                 }
             }
-            AddProgress::Done { hash, id } => {
-                tracing::trace!("Done({id},{hash:?})");
+            AddProgress::Progress { offset } => {
+                tracing::trace!("Progress({offset})");
                 if let Some(mp) = mp.as_mut() {
-                    mp.done(id, hash);
+                    mp.progress(0, offset);
                 }
-                match collections.get_mut(&id) {
+            }
+            AddProgress::Done { hash } => {
+                tracing::trace!("Done({hash:?})");
+                if let Some(mp) = mp.as_mut() {
+                    mp.done(0, hash);
+                }
+                match collections.get_mut(&0) {
                     Some((_, _, ref mut h)) => {
                         *h = Some(hash);
                     }
                     None => {
-                        anyhow::bail!("Got Done for unknown collection id {id}");
+                        anyhow::bail!("Got Done for unknown collection id");
                     }
                 }
             }
