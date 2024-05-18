@@ -39,7 +39,18 @@ use crate::client::blobs::{
 use crate::client::tags::TagInfo;
 use crate::client::NodeStatus;
 use crate::rpc_protocol::{
-    BatchAddStreamRequest, BatchAddStreamResponse, BatchAddStreamUpdate, BlobAddPathRequest, BlobAddPathResponse, BlobAddStreamRequest, BlobAddStreamResponse, BlobAddStreamUpdate, BlobConsistencyCheckRequest, BlobDeleteBlobRequest, BlobDownloadRequest, BlobDownloadResponse, BlobExportRequest, BlobExportResponse, BlobGetCollectionRequest, BlobGetCollectionResponse, BlobListCollectionsRequest, BlobListIncompleteRequest, BlobListRequest, BlobReadAtRequest, BlobReadAtResponse, BlobTempTagScopeRequest, BlobTempTagScopeResponse, BlobTempTagScopeUpdate, BlobValidateRequest, CreateCollectionRequest, CreateCollectionResponse, DeleteTagRequest, DocExportFileRequest, DocExportFileResponse, DocImportFileRequest, DocImportFileResponse, DocSetHashRequest, ListTagsRequest, NodeAddrRequest, NodeConnectionInfoRequest, NodeConnectionInfoResponse, NodeConnectionsRequest, NodeConnectionsResponse, NodeIdRequest, NodeRelayRequest, NodeShutdownRequest, NodeStatsRequest, NodeStatsResponse, NodeStatusRequest, NodeWatchRequest, NodeWatchResponse, Request, RpcService, SetTagOption
+    BatchAddStreamRequest, BatchAddStreamResponse, BatchAddStreamUpdate, BlobAddPathRequest,
+    BlobAddPathResponse, BlobAddStreamRequest, BlobAddStreamResponse, BlobAddStreamUpdate,
+    BlobConsistencyCheckRequest, BlobDeleteBlobRequest, BlobDownloadRequest, BlobDownloadResponse,
+    BlobExportRequest, BlobExportResponse, BlobGetCollectionRequest, BlobGetCollectionResponse,
+    BlobListCollectionsRequest, BlobListIncompleteRequest, BlobListRequest, BlobReadAtRequest,
+    BlobReadAtResponse, BlobTempTagScopeRequest, BlobTempTagScopeResponse, BlobTempTagScopeUpdate,
+    BlobValidateRequest, CreateCollectionRequest, CreateCollectionResponse, DeleteTagRequest,
+    DocExportFileRequest, DocExportFileResponse, DocImportFileRequest, DocImportFileResponse,
+    DocSetHashRequest, ListTagsRequest, NodeAddrRequest, NodeConnectionInfoRequest,
+    NodeConnectionInfoResponse, NodeConnectionsRequest, NodeConnectionsResponse, NodeIdRequest,
+    NodeRelayRequest, NodeShutdownRequest, NodeStatsRequest, NodeStatsResponse, NodeStatusRequest,
+    NodeWatchRequest, NodeWatchResponse, Request, RpcService, SetTagOption,
 };
 
 use super::{Event, NodeInner};
@@ -280,7 +291,8 @@ impl<D: BaoStore> Handler<D> {
                     .await
                 }
                 BatchAddStreamRequest(msg) => {
-                    chan.bidi_streaming(msg, handler, Self::batch_add_stream).await
+                    chan.bidi_streaming(msg, handler, Self::batch_add_stream)
+                        .await
                 }
                 BatchAddStreamUpdate(_msg) => Err(RpcServerError::UnexpectedUpdateMessage),
             }
@@ -826,10 +838,16 @@ impl<D: BaoStore> Handler<D> {
             while let Some(item) = updates.next().await {
                 match item {
                     BlobTempTagScopeUpdate::Drop(tag_id) => {
-                        self.inner.temp_tags.lock().unwrap().remove_one(scope_id, tag_id);
-                    },
+                        println!("dropping tag {} {}", scope_id, tag_id);
+                        self.inner
+                            .temp_tags
+                            .lock()
+                            .unwrap()
+                            .remove_one(scope_id, tag_id);
+                    }
                 }
             }
+            println!("dropping scope {}", scope_id);
             self.inner.temp_tags.lock().unwrap().remove(scope_id);
         });
         futures_lite::stream::once(BlobTempTagScopeResponse::Id(scope_id))
@@ -840,17 +858,17 @@ impl<D: BaoStore> Handler<D> {
         msg: BatchAddStreamRequest,
         stream: impl Stream<Item = BatchAddStreamUpdate> + Send + Unpin + 'static,
     ) -> impl Stream<Item = BatchAddStreamResponse> {
-        futures_lite::stream::empty()
         let (tx, rx) = flume::bounded(32);
         let this = self.clone();
 
         self.rt().spawn_pinned(|| async move {
-            if let Err(err) = this.blob_add_stream0(msg, stream, tx.clone()).await {
-                tx.send_async(AddProgress::Abort(err.into())).await.ok();
+            if let Err(err) = this.batch_add_stream0(msg, stream, tx.clone()).await {
+                tx.send_async(BatchAddStreamResponse::Abort(err.into()))
+                    .await
+                    .ok();
             }
         });
-
-        // rx.into_stream().map(BlobAddStreamResponse)
+        rx.into_stream()
     }
 
     fn blob_add_stream(
@@ -868,6 +886,48 @@ impl<D: BaoStore> Handler<D> {
         });
 
         rx.into_stream().map(BlobAddStreamResponse)
+    }
+
+    async fn batch_add_stream0(
+        self,
+        msg: BatchAddStreamRequest,
+        stream: impl Stream<Item = BatchAddStreamUpdate> + Send + Unpin + 'static,
+        progress: flume::Sender<BatchAddStreamResponse>,
+    ) -> anyhow::Result<()> {
+        println!("batch_add_stream0");
+        let progress = FlumeProgressSender::new(progress);
+
+        let stream = stream.map(|item| match item {
+            BatchAddStreamUpdate::Chunk(chunk) => Ok(chunk),
+            BatchAddStreamUpdate::Abort => {
+                Err(io::Error::new(io::ErrorKind::Interrupted, "Remote abort"))
+            }
+        });
+
+        let import_progress = progress.clone().with_filter_map(move |x| match x {
+            _ => None,
+        });
+        println!("collecting stream");
+        let items: Vec<_> = stream.collect().await;
+        println!("stream collected");
+        let stream = futures_lite::stream::iter(items.into_iter());
+        let (temp_tag, _len) = self
+            .inner
+            .db
+            .import_stream(stream, BlobFormat::Raw, import_progress)
+            .await?;
+        println!("stream imported {:?}", temp_tag.inner().hash);
+        let hash = temp_tag.inner().hash;
+        let tag = self
+            .inner
+            .temp_tags
+            .lock()
+            .unwrap()
+            .create_one(msg.scope, temp_tag);
+        progress
+            .send(BatchAddStreamResponse::Result { hash, tag })
+            .await?;
+        Ok(())
     }
 
     async fn blob_add_stream0(

@@ -118,7 +118,6 @@ struct TempTagScope {
 }
 
 impl TempTagScopes {
-
     fn create(&mut self) -> u64 {
         let id = self.max;
         self.max += 1;

@@ -815,27 +815,26 @@ where
                 }
                 AddProgress::Done { hash } => {
                     tracing::info!("Done({hash:?})");
-                            imp.set_add_progress(fsize);
-                            imp.import_found("".to_string());
-                            rhash = Some(hash);
-                            let path = root.join(&prefix);
-                            let path_str = path.display().to_string();
-                            let key =
-                                match path_to_key(path, Some(prefix.clone()), Some(root.clone())) {
-                                    Ok(k) => k.to_vec(),
-                                    Err(e) => {
-                                        tracing::info!("error getting key from {}", path_str);
-                                        return Some(Err(anyhow::anyhow!(
-                                            "Issue creating a key for entry {hash:?}: {e}"
-                                        )));
-                                    }
-                                };
-                            // send update to doc
-                            tracing::info!(
-                                "setting entry {} to doc",
-                                String::from_utf8(key.clone()).unwrap()
-                            );
-                            Some(Ok((key, hash, fsize)))
+                    imp.set_add_progress(fsize);
+                    imp.import_found("".to_string());
+                    rhash = Some(hash);
+                    let path = root.join(&prefix);
+                    let path_str = path.display().to_string();
+                    let key = match path_to_key(path, Some(prefix.clone()), Some(root.clone())) {
+                        Ok(k) => k.to_vec(),
+                        Err(e) => {
+                            tracing::info!("error getting key from {}", path_str);
+                            return Some(Err(anyhow::anyhow!(
+                                "Issue creating a key for entry {hash:?}: {e}"
+                            )));
+                        }
+                    };
+                    // send update to doc
+                    tracing::info!(
+                        "setting entry {} to doc",
+                        String::from_utf8(key.clone()).unwrap()
+                    );
+                    Some(Ok((key, hash, fsize)))
                 }
                 AddProgress::AllDone { hash, .. } => {
                     imp.add_done();

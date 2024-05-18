@@ -1009,7 +1009,6 @@ impl BidiStreamingMsg<RpcService> for BlobAddStreamRequest {
 #[derive(Debug, Serialize, Deserialize, derive_more::Into)]
 pub struct BlobAddStreamResponse(pub AddProgress);
 
-
 /// Write a blob from a byte stream
 #[derive(Serialize, Deserialize, Debug)]
 pub struct BatchAddStreamRequest {
@@ -1039,9 +1038,9 @@ impl BidiStreamingMsg<RpcService> for BatchAddStreamRequest {
 
 /// Wrapper around [`AddProgress`].
 #[derive(Debug, Serialize, Deserialize)]
-pub struct BatchAddStreamResponse {
-    pub hash: Hash,
-    pub tag: u64,
+pub enum BatchAddStreamResponse {
+    Abort(RpcError),
+    Result { hash: Hash, tag: u64 },
 }
 
 /// Get stats for the running Iroh node
