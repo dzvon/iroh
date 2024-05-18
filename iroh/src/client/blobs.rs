@@ -4,7 +4,7 @@ use std::{
     io,
     path::PathBuf,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     task::{Context, Poll},
 };
 
@@ -57,22 +57,26 @@ impl<'a, C: ServiceConnection<RpcService>> From<&'a Iroh<C>> for &'a RpcClient<R
 
 /// A scope in which blobs can be added.
 #[derive(derive_more::Debug)]
-pub struct Batch<C: ServiceConnection<RpcService>> {
+struct BatchInner<C: ServiceConnection<RpcService>> {
     /// The id of the scope.
     id: u64,
-    /// The drop function to call when a tag is dropped.
-    #[debug(skip)]
-    drop: Arc<dyn Fn(u64) + Send + Sync + 'static>,
     /// The rpc client.
     rpc: RpcClient<RpcService, C>,
     /// The stream to send drop
-    updates: Arc<Mutex<Option<UpdateSink<RpcService, C, BlobTempTagScopeUpdate>>>>,
+    updates: Mutex<UpdateSink<RpcService, C, BlobTempTagScopeUpdate>>,
 }
 
-impl<C: ServiceConnection<RpcService>> Drop for Batch<C> {
-    fn drop(&mut self) {
-        println!("dropping batch {}", self.id);
-        self.updates.lock().unwrap().take();
+///
+
+#[derive(derive_more::Debug)]
+pub struct Batch<C: ServiceConnection<RpcService>>(Arc<BatchInner<C>>);
+
+impl<C: ServiceConnection<RpcService>> TagDrop for BatchInner<C> {
+    fn tag_drop(&self, id: u64) {
+        let mut updates = self.updates.lock().unwrap();
+        updates
+            .send(BlobTempTagScopeUpdate::Drop(id))
+            .now_or_never();
     }
 }
 
@@ -89,10 +93,11 @@ impl<C: ServiceConnection<RpcService>> Batch<C> {
         mut input: impl Stream<Item = io::Result<Bytes>> + Send + Unpin + 'static,
         format: BlobFormat,
     ) -> Result<TempTag> {
-        let (mut sink, mut stream) = self
+        let (mut sink, mut stream) = 
+            self.0
             .rpc
             .bidi(BatchAddStreamRequest {
-                scope: self.id,
+                scope: self.0.id,
                 format,
             })
             .await?;
@@ -131,47 +136,70 @@ impl<C: ServiceConnection<RpcService>> Batch<C> {
             }
         }
         let (hash, tag) = res.context("Missing answer")?;
-        Ok(TempTag {
-            drop: self.drop.clone(),
-            id: tag,
-            hash_and_format: HashAndFormat { hash, format },
-        })
+        let t: Arc<dyn TagDrop> = self.0.clone();
+        Ok(TempTag::new(
+            tag,
+            HashAndFormat { hash, format },
+            Arc::downgrade(&t),
+        ))
     }
 }
 
-///
+trait TagDrop: Send + Sync + 'static {
+    fn tag_drop(&self, id: u64);
+}
+
 #[derive(derive_more::Debug)]
-pub struct TempTag {
-    /// The id of the temporary tag.
+struct TempTagInner {
+    /// The id of the tag, to be used in the drop function.
     id: u64,
-    /// The hash and format of the blob.
+    /// The hash and format of the blob, for convenience.
     hash_and_format: HashAndFormat,
     /// The drop function to call when the tag is dropped.
     #[debug(skip)]
-    drop: Arc<dyn Fn(u64) + Send + Sync + 'static>,
+    drop: Weak<dyn TagDrop>,
 }
 
+/// Todo?: use https://crates.io/crates/generativity to bind a temp tag
+/// to its scope, so that it can't be used with another scope.
+#[derive(derive_more::Debug)]
+pub struct TempTag(Arc<TempTagInner>);
+
 impl TempTag {
+    fn new(
+        id: u64,
+        hash_and_format: HashAndFormat,
+        drop: Weak<dyn TagDrop>,
+    ) -> Self {
+        Self(Arc::new(TempTagInner {
+            id,
+            hash_and_format,
+            drop,
+        }))
+    }
+
     /// Get the hash of the blob.
     pub fn hash(&self) -> Hash {
-        self.hash_and_format.hash
+        self.0.hash_and_format.hash
     }
 
     /// Get the format of the blob.
     pub fn format(&self) -> BlobFormat {
-        self.hash_and_format.format
+        self.0.hash_and_format.format
     }
 
     /// Get the hash and format of the blob.
     fn hash_and_format(&self) -> HashAndFormat {
-        self.hash_and_format
+        self.0.hash_and_format
     }
 }
 
-impl Drop for TempTag {
+impl Drop for TempTagInner {
     fn drop(&mut self) {
         println!("dropping tag {}", self.id);
-        (self.drop)(self.id);
+        if let Some(drop) = self.drop.upgrade() {
+            drop.tag_drop(self.id);
+        }
     }
 }
 
@@ -182,25 +210,15 @@ where
     /// Create a new scope in which blobs can be added.
     pub async fn batch(&self) -> Result<Batch<C>> {
         let (updates, mut stream) = self.rpc.bidi(BlobTempTagScopeRequest).await?;
-        let updates = Arc::new(Mutex::new(Some(updates)));
-        let updates1 = updates.clone();
-        let drop = Arc::new(move |id| {
-            println!("sending drop for id {}", id);
-            if let Some(updates) = updates1.lock().unwrap().as_mut() {
-                updates
-                    .send(BlobTempTagScopeUpdate::Drop(id))
-                    .now_or_never();
-            }
-        });
+        let updates = Mutex::new(updates);
         let BlobTempTagScopeResponse::Id(id) =
             stream.next().await.context("expected scope id")??;
         let rpc = self.rpc.clone();
-        Ok(Batch {
+        Ok(Batch(Arc::new(BatchInner {
             id,
-            drop,
             rpc,
             updates,
-        })
+        })))
     }
 
     /// Stream the contents of a a single blob.
