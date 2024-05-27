@@ -2,8 +2,6 @@
 //!
 //! A node is a server that serves various protocols.
 //!
-//! You can monitor what is happening in the node using [`Node::subscribe`].
-//!
 //! To shut down the node, call [`Node::shutdown`].
 use std::fmt::Debug;
 use std::net::SocketAddr;
@@ -11,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use futures_lite::{future::Boxed as BoxFuture, FutureExt, StreamExt};
+use futures_lite::StreamExt;
 use iroh_base::key::PublicKey;
 use iroh_blobs::downloader::Downloader;
 use iroh_blobs::store::Store as BaoStore;
@@ -19,14 +17,13 @@ use iroh_net::util::AbortingJoinHandle;
 use iroh_net::{endpoint::LocalEndpointsStream, key::SecretKey, Endpoint};
 use quic_rpc::transport::flume::FlumeConnection;
 use quic_rpc::RpcClient;
-use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::LocalPoolHandle;
 use tracing::debug;
 
+use crate::client::RpcService;
 use crate::docs_engine::Engine;
-use crate::rpc_protocol::{Request, Response};
 
 mod builder;
 mod rpc;
@@ -34,38 +31,6 @@ mod rpc_status;
 
 pub use self::builder::{Builder, DiscoveryConfig, GcPolicy, StorageConfig};
 pub use self::rpc_status::RpcStatus;
-
-type EventCallback = Box<dyn Fn(Event) -> BoxFuture<()> + 'static + Sync + Send>;
-
-#[derive(Default, derive_more::Debug, Clone)]
-struct Callbacks(#[debug("..")] Arc<RwLock<Vec<EventCallback>>>);
-
-impl Callbacks {
-    async fn push(&self, cb: EventCallback) {
-        self.0.write().await.push(cb);
-    }
-
-    #[allow(dead_code)]
-    async fn send(&self, event: Event) {
-        let cbs = self.0.read().await;
-        for cb in &*cbs {
-            cb(event.clone()).await;
-        }
-    }
-}
-
-impl iroh_blobs::provider::EventSender for Callbacks {
-    fn send(&self, event: iroh_blobs::provider::Event) -> BoxFuture<()> {
-        let this = self.clone();
-        async move {
-            let cbs = this.0.read().await;
-            for cb in &*cbs {
-                cb(Event::ByteProvide(event.clone())).await;
-            }
-        }
-        .boxed()
-    }
-}
 
 /// A server which implements the iroh node.
 ///
@@ -90,25 +55,13 @@ struct NodeInner<D> {
     endpoint: Endpoint,
     secret_key: SecretKey,
     cancel_token: CancellationToken,
-    controller: FlumeConnection<Response, Request>,
-    #[debug("callbacks: Sender<Box<dyn Fn(Event)>>")]
-    cb_sender: mpsc::Sender<Box<dyn Fn(Event) -> BoxFuture<()> + Send + Sync + 'static>>,
-    callbacks: Callbacks,
+    controller: FlumeConnection<RpcService>,
     #[allow(dead_code)]
     gc_task: Option<AbortingJoinHandle<()>>,
     #[debug("rt")]
     rt: LocalPoolHandle,
     pub(crate) sync: Engine,
     downloader: Downloader,
-}
-
-/// Events emitted by the [`Node`] informing about the current status.
-#[derive(Debug, Clone)]
-pub enum Event {
-    /// Events from the iroh-blobs transfer protocol.
-    ByteProvide(iroh_blobs::provider::Event),
-    /// Events from database
-    Db(iroh_blobs::store::Event),
 }
 
 /// In memory node.
@@ -175,18 +128,6 @@ impl<D: BaoStore> Node<D> {
     /// Returns the [`PublicKey`] of the node.
     pub fn node_id(&self) -> PublicKey {
         self.inner.secret_key.public()
-    }
-
-    /// Subscribe to [`Event`]s emitted from the node, informing about connections and
-    /// progress.
-    ///
-    /// Warning: The callback must complete quickly, as otherwise it will block ongoing work.
-    pub async fn subscribe<F: Fn(Event) -> BoxFuture<()> + Send + Sync + 'static>(
-        &self,
-        cb: F,
-    ) -> Result<()> {
-        self.inner.cb_sender.send(Box::new(cb)).await?;
-        Ok(())
     }
 
     /// Returns a handle that can be used to do RPC calls to the node internally.
@@ -319,23 +260,7 @@ mod tests {
 
         let _drop_guard = node.cancel_token().drop_guard();
 
-        let (r, mut s) = mpsc::channel(1);
-        node.subscribe(move |event| {
-            let r = r.clone();
-            async move {
-                if let Event::ByteProvide(iroh_blobs::provider::Event::TaggedBlobAdded {
-                    hash,
-                    ..
-                }) = event
-                {
-                    r.send(hash).await.ok();
-                }
-            }
-            .boxed()
-        })
-        .await?;
-
-        let got_hash = tokio::time::timeout(Duration::from_secs(1), async move {
+        let _got_hash = tokio::time::timeout(Duration::from_secs(1), async move {
             let mut stream = node
                 .controller()
                 .server_streaming(BlobAddPathRequest {
@@ -363,9 +288,6 @@ mod tests {
         .await
         .context("timeout")?
         .context("get failed")?;
-
-        let event_hash = s.recv().await.expect("missing add tagged blob event");
-        assert_eq!(got_hash, event_hash);
 
         Ok(())
     }
@@ -463,6 +385,130 @@ mod tests {
                 .as_ref(),
             b"foo"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_default_author_memory() -> Result<()> {
+        let iroh = Node::memory().spawn().await?;
+        let author = iroh.authors.default().await?;
+        assert!(iroh.authors.export(author).await?.is_some());
+        assert!(iroh.authors.delete(author).await.is_err());
+        Ok(())
+    }
+
+    #[cfg(feature = "fs-store")]
+    #[tokio::test]
+    async fn test_default_author_persist() -> Result<()> {
+        use crate::util::path::IrohPaths;
+
+        let _guard = iroh_test::logging::setup();
+
+        let iroh_root_dir = tempfile::TempDir::new().unwrap();
+        let iroh_root = iroh_root_dir.path();
+
+        // check that the default author exists and cannot be deleted.
+        let default_author = {
+            let iroh = Node::persistent(iroh_root)
+                .await
+                .unwrap()
+                .spawn()
+                .await
+                .unwrap();
+            let author = iroh.authors.default().await.unwrap();
+            assert!(iroh.authors.export(author).await.unwrap().is_some());
+            assert!(iroh.authors.delete(author).await.is_err());
+            iroh.shutdown().await.unwrap();
+            author
+        };
+
+        // check that the default author is persisted across restarts.
+        {
+            let iroh = Node::persistent(iroh_root)
+                .await
+                .unwrap()
+                .spawn()
+                .await
+                .unwrap();
+            let author = iroh.authors.default().await.unwrap();
+            assert_eq!(author, default_author);
+            assert!(iroh.authors.export(author).await.unwrap().is_some());
+            assert!(iroh.authors.delete(author).await.is_err());
+            iroh.shutdown().await.unwrap();
+        };
+
+        // check that a new default author is created if the default author file is deleted
+        // manually.
+        let default_author = {
+            tokio::fs::remove_file(IrohPaths::DefaultAuthor.with_root(iroh_root))
+                .await
+                .unwrap();
+            let iroh = Node::persistent(iroh_root)
+                .await
+                .unwrap()
+                .spawn()
+                .await
+                .unwrap();
+            let author = iroh.authors.default().await.unwrap();
+            assert!(author != default_author);
+            assert!(iroh.authors.export(author).await.unwrap().is_some());
+            assert!(iroh.authors.delete(author).await.is_err());
+            iroh.shutdown().await.unwrap();
+            author
+        };
+
+        // check that the node fails to start if the default author is missing from the docs store.
+        {
+            let mut docs_store = iroh_docs::store::fs::Store::persistent(
+                IrohPaths::DocsDatabase.with_root(iroh_root),
+            )
+            .unwrap();
+            docs_store.delete_author(default_author).unwrap();
+            docs_store.flush().unwrap();
+            drop(docs_store);
+            let iroh = Node::persistent(iroh_root).await.unwrap().spawn().await;
+            dbg!(&iroh);
+            assert!(iroh.is_err());
+
+            // somehow the blob store is not shutdown correctly (yet?) on macos.
+            // so we give it some time until we find a proper fix.
+            #[cfg(target_os = "macos")]
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            tokio::fs::remove_file(IrohPaths::DefaultAuthor.with_root(iroh_root))
+                .await
+                .unwrap();
+            drop(iroh);
+            let iroh = Node::persistent(iroh_root).await.unwrap().spawn().await;
+            assert!(iroh.is_ok());
+            iroh.unwrap().shutdown().await.unwrap();
+        }
+
+        // check that the default author can be set manually and is persisted.
+        let default_author = {
+            let iroh = Node::persistent(iroh_root)
+                .await
+                .unwrap()
+                .spawn()
+                .await
+                .unwrap();
+            let author = iroh.authors.create().await.unwrap();
+            iroh.authors.set_default(author).await.unwrap();
+            assert_eq!(iroh.authors.default().await.unwrap(), author);
+            iroh.shutdown().await.unwrap();
+            author
+        };
+        {
+            let iroh = Node::persistent(iroh_root)
+                .await
+                .unwrap()
+                .spawn()
+                .await
+                .unwrap();
+            assert_eq!(iroh.authors.default().await.unwrap(), default_author);
+            iroh.shutdown().await.unwrap();
+        }
+
         Ok(())
     }
 }

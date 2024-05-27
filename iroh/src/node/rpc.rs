@@ -52,7 +52,7 @@ use crate::rpc_protocol::{
     NodeWatchResponse, Request, RpcService, SetTagOption,
 };
 
-use super::{Event, NodeInner};
+use super::NodeInner;
 
 const HEALTH_POLL_WAIT: Duration = Duration::from_secs(1);
 /// Chunk size for getting blobs over RPC
@@ -158,6 +158,18 @@ impl<D: BaoStore> Handler<D> {
                 AuthorDelete(msg) => {
                     chan.rpc(msg, handler, |handler, req| async move {
                         handler.inner.sync.author_delete(req).await
+                    })
+                    .await
+                }
+                AuthorGetDefault(msg) => {
+                    chan.rpc(msg, handler, |handler, req| async move {
+                        handler.inner.sync.author_default(req)
+                    })
+                    .await
+                }
+                AuthorSetDefault(msg) => {
+                    chan.rpc(msg, handler, |handler, req| async move {
+                        handler.inner.sync.author_set_default(req).await
                     })
                     .await
                 }
@@ -743,13 +755,6 @@ impl<D: BaoStore> Handler<D> {
                 tag: tag.clone(),
             })
             .await?;
-        self.inner
-            .callbacks
-            .send(Event::ByteProvide(
-                iroh_blobs::provider::Event::TaggedBlobAdded { hash, format, tag },
-            ))
-            .await;
-
         Ok(())
     }
 
