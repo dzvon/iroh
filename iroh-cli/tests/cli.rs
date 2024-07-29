@@ -142,10 +142,18 @@ fn cli_provide_tree_resume() -> Result<()> {
         make_rand_file(5000, &file3)?;
     }
 
-    let second_test_dir = tmp.join("get_iroh_data_dir_02");
-    let third_test_dir = tmp.join("get_iroh_data_dir_03");
-    copy_blob_dirs(&src_iroh_data_dir, &second_test_dir)?;
-    copy_blob_dirs(&src_iroh_data_dir, &third_test_dir)?;
+    // setup the dirs for all tests before hand, In windows they are locked so we can't copy them
+    // then
+    {
+        let provider = make_provider_in(&src_iroh_data_dir, Input::Path(src.clone()), false)?;
+        drop(provider);
+        let second_test_dir = tmp.join("get_iroh_data_dir_02");
+        let third_test_dir = tmp.join("get_iroh_data_dir_03");
+        let fourth_test_dir = tmp.join("get_iroh_data_dir_04");
+        copy_blob_dirs(&src_iroh_data_dir, &second_test_dir)?;
+        copy_blob_dirs(&src_iroh_data_dir, &third_test_dir)?;
+        copy_blob_dirs(&src_iroh_data_dir, &fourth_test_dir)?;
+    }
 
     // leave the provider running for the entire test
     let provider = make_provider_in(&src_iroh_data_dir, Input::Path(src.clone()), false)?;
@@ -199,7 +207,7 @@ fn cli_provide_tree_resume() -> Result<()> {
     // fourth test - partial work dir - truncate some large files
     {
         println!("fourth test - partial work dir - truncate some large files");
-        let get_iroh_data_dir = tmp.join("get_iroh_data_dir_04");
+        let get_iroh_data_dir = fourth_test_dir;
         copy_blob_dirs(&src_iroh_data_dir, &get_iroh_data_dir)?;
         make_partial(&get_iroh_data_dir, |_hash, size| {
             if size == 100000 {
