@@ -41,7 +41,6 @@ fn make_rand_file(size: usize, path: &Path) -> Result<Hash> {
 }
 
 #[test]
-#[ignore = "flaky"]
 fn cli_provide_one_file_basic() -> Result<()> {
     let dir = testdir!();
     let path = dir.join("foo");
@@ -51,7 +50,6 @@ fn cli_provide_one_file_basic() -> Result<()> {
 }
 
 #[test]
-#[ignore = "flaky"]
 fn cli_provide_one_file_large() -> Result<()> {
     let dir = testdir!();
     let path = dir.join("foo");
@@ -62,7 +60,6 @@ fn cli_provide_one_file_large() -> Result<()> {
 
 /// Test single file download to a path
 #[test]
-#[ignore = "flaky"]
 fn cli_provide_one_file_single_path() -> Result<()> {
     let dir = testdir!();
     let path = dir.join("foo");
@@ -74,7 +71,6 @@ fn cli_provide_one_file_single_path() -> Result<()> {
 
 /// test single file download to stdout
 #[test]
-#[ignore = "flaky"]
 fn cli_provide_one_file_single_stdout() -> Result<()> {
     let dir = testdir!();
     let path = dir.join("foo");
@@ -86,7 +82,6 @@ fn cli_provide_one_file_single_stdout() -> Result<()> {
 }
 
 #[test]
-#[ignore = "flaky"]
 fn cli_provide_folder() -> Result<()> {
     let path = testdir!().join("src");
     std::fs::create_dir(&path)?;
@@ -99,7 +94,6 @@ fn cli_provide_folder() -> Result<()> {
 }
 
 #[test]
-#[ignore = "flaky"]
 fn cli_provide_tree() -> Result<()> {
     let path = testdir!().join("src");
     std::fs::create_dir(&path)?;
@@ -119,7 +113,6 @@ fn cli_provide_tree() -> Result<()> {
 }
 
 #[test]
-#[ignore = "flaky"]
 fn cli_provide_tree_resume() -> Result<()> {
     use iroh::blobs::store::fs::test_support::{make_partial, MakePartialResult};
 
@@ -148,6 +141,12 @@ fn cli_provide_tree_resume() -> Result<()> {
         make_rand_file(100000, &file2)?;
         make_rand_file(5000, &file3)?;
     }
+
+    let second_test_dir = tmp.join("get_iroh_data_dir_02");
+    let third_test_dir = tmp.join("get_iroh_data_dir_03");
+    copy_blob_dirs(&src_iroh_data_dir, &second_test_dir)?;
+    copy_blob_dirs(&src_iroh_data_dir, &third_test_dir)?;
+
     // leave the provider running for the entire test
     let provider = make_provider_in(&src_iroh_data_dir, Input::Path(src.clone()), false)?;
     let count = count_input_files(&src);
@@ -167,8 +166,7 @@ fn cli_provide_tree_resume() -> Result<()> {
     // second test - full work dir
     {
         println!("second test - full work dir");
-        let get_iroh_data_dir = tmp.join("get_iroh_data_dir_02");
-        copy_blob_dirs(&src_iroh_data_dir, &get_iroh_data_dir)?;
+        let get_iroh_data_dir = second_test_dir;
         let get = make_get_cmd(&get_iroh_data_dir, &ticket, Some(tgt.clone()));
         let get_output = get.unchecked().run()?;
         assert!(get_output.status.success());
@@ -181,8 +179,7 @@ fn cli_provide_tree_resume() -> Result<()> {
     // third test - partial work dir - remove some large files
     {
         println!("third test - partial work dir - remove some large files");
-        let get_iroh_data_dir = tmp.join("get_iroh_data_dir_03");
-        copy_blob_dirs(&src_iroh_data_dir, &get_iroh_data_dir)?;
+        let get_iroh_data_dir = third_test_dir;
         make_partial(&get_iroh_data_dir, |_hash, size| {
             if size == 100000 {
                 MakePartialResult::Remove
