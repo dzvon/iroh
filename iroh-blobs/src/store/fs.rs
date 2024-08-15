@@ -83,7 +83,7 @@ use iroh_io::AsyncSliceReader;
 use redb::{AccessGuard, DatabaseError, ReadableTable, StorageError};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use tokio::io::AsyncWriteExt;
+use tokio::{io::AsyncWriteExt, sync::oneshot};
 use tracing::trace_span;
 
 mod import_flat_store;
@@ -769,7 +769,7 @@ impl Store {
 
 #[derive(Debug)]
 struct StoreInner {
-    tx: async_channel::Sender<ActorMessage>,
+    tx: tokio::sync::mpsc::Sender<ActorMessage>,
     temp: Arc<RwLock<TempCounterMap>>,
     handle: Option<std::thread::JoinHandle<()>>,
     path_options: Arc<PathOptions>,
@@ -930,9 +930,12 @@ impl StoreInner {
 
     fn entry_status_sync(&self, hash: &Hash) -> OuterResult<EntryStatus> {
         let (tx, rx) = oneshot::channel();
-        self.tx
-            .send_blocking(ActorMessage::EntryStatus { hash: *hash, tx })?;
-        Ok(rx.recv()??)
+        crate::util::block_on(async move {
+            self.tx
+                .send(ActorMessage::EntryStatus { hash: *hash, tx })
+                .await?;
+            Ok(rx.await??)
+        })
     }
 
     async fn complete(&self, entry: Entry) -> OuterResult<()> {
@@ -1129,7 +1132,7 @@ impl StoreInner {
         let hash = *tag.hash();
         // blocking send for the import
         let (tx, rx) = oneshot::channel();
-        self.tx.send_blocking(ActorMessage::Import {
+        crate::util::block_on(self.tx.send(ActorMessage::Import {
             cmd: Import {
                 content_id: HashAndFormat { hash, format },
                 source: file,
@@ -1137,8 +1140,8 @@ impl StoreInner {
                 data_size,
             },
             tx,
-        })?;
-        Ok(rx.recv()??)
+        }))?;
+        Ok(crate::util::block_on(rx)??)
     }
 
     fn temp_file_name(&self) -> PathBuf {
@@ -1158,9 +1161,9 @@ impl StoreInner {
 impl Drop for StoreInner {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            self.tx
-                .send_blocking(ActorMessage::Shutdown { tx: None })
-                .ok();
+            crate::util::block_on(async move {
+                self.tx.send(ActorMessage::Shutdown { tx: None }).await.ok();
+            });
             handle.join().ok();
         }
     }
@@ -1170,7 +1173,7 @@ struct ActorState {
     handles: BTreeMap<Hash, BaoFileHandleWeak>,
     protected: BTreeSet<Hash>,
     temp: Arc<RwLock<TempCounterMap>>,
-    msgs_rx: async_channel::Receiver<ActorMessage>,
+    msgs_rx: Option<tokio::sync::mpsc::Receiver<ActorMessage>>,
     create_options: Arc<BaoFileConfig>,
     options: Options,
     rt: tokio::runtime::Handle,
@@ -1236,15 +1239,15 @@ pub(crate) enum OuterError {
     #[error("progress send error: {0}")]
     ProgressSend(#[from] ProgressSendError),
     #[error("recv error: {0}")]
-    Recv(#[from] oneshot::RecvError),
+    Recv(#[from] oneshot::error::RecvError),
     #[error("recv error: {0}")]
     AsyncChannelRecv(#[from] async_channel::RecvError),
     #[error("join error: {0}")]
     JoinTask(#[from] tokio::task::JoinError),
 }
 
-impl From<async_channel::SendError<ActorMessage>> for OuterError {
-    fn from(_e: async_channel::SendError<ActorMessage>) -> Self {
+impl From<tokio::sync::mpsc::error::SendError<ActorMessage>> for OuterError {
+    fn from(_e: tokio::sync::mpsc::error::SendError<ActorMessage>) -> Self {
         OuterError::Send
     }
 }
@@ -1433,7 +1436,7 @@ impl Actor {
         options: Options,
         temp: Arc<RwLock<TempCounterMap>>,
         rt: tokio::runtime::Handle,
-    ) -> ActorResult<(Self, async_channel::Sender<ActorMessage>)> {
+    ) -> ActorResult<(Self, tokio::sync::mpsc::Sender<ActorMessage>)> {
         let db = match redb::Database::create(path) {
             Ok(db) => db,
             Err(DatabaseError::UpgradeRequired(1)) => {
@@ -1450,12 +1453,11 @@ impl Actor {
         txn.commit()?;
         // make the channel relatively large. there are some messages that don't
         // require a response, it's fine if they pile up a bit.
-        let (tx, rx) = async_channel::bounded(1024);
+        let (tx, rx) = tokio::sync::mpsc::channel(1024);
         let tx2 = tx.clone();
         let on_file_create: CreateCb = Arc::new(move |hash| {
             // todo: make the callback allow async
-            tx2.send_blocking(ActorMessage::OnMemSizeExceeded { hash: *hash })
-                .ok();
+            crate::util::block_on(tx2.send(ActorMessage::OnMemSizeExceeded { hash: *hash })).ok();
             Ok(())
         });
         let create_options = BaoFileConfig::new(
@@ -1470,7 +1472,7 @@ impl Actor {
                     temp,
                     handles: BTreeMap::new(),
                     protected: BTreeSet::new(),
-                    msgs_rx: rx,
+                    msgs_rx: Some(rx),
                     options,
                     create_options: Arc::new(create_options),
                     rt,
@@ -1481,7 +1483,7 @@ impl Actor {
     }
 
     async fn run_batched(mut self) -> ActorResult<()> {
-        let mut msgs = PeekableFlumeReceiver::new(self.state.msgs_rx.clone());
+        let mut msgs = PeekableFlumeReceiver::new(self.state.msgs_rx.take().unwrap());
         while let Some(msg) = msgs.recv().await {
             if let ActorMessage::Shutdown { tx } = msg {
                 // Make sure the database is dropped before we send the reply.

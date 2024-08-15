@@ -2,13 +2,20 @@
 use bao_tree::{io::outboard::PreOrderOutboard, BaoTree, ChunkRanges};
 use bytes::Bytes;
 use derive_more::{Debug, Display, From, Into};
+use futures_util::task::{waker_ref, ArcWake};
 use range_collections::range_set::RangeSetRange;
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Borrow,
     fmt,
+    future::Future,
     io::{BufReader, Read},
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Weak,
+    },
+    task::Poll,
+    thread::Thread,
     time::SystemTime,
 };
 
@@ -359,5 +366,64 @@ impl<R: std::io::Read, F: Fn(u64) -> std::io::Result<()>> std::io::Read for Prog
         self.offset += read as u64;
         (self.cb)(self.offset)?;
         Ok(read)
+    }
+}
+
+struct ThreadParker {
+    thread: Thread,
+    parked: AtomicBool,
+}
+
+impl ThreadParker {
+    fn new() -> Self {
+        Self {
+            thread: std::thread::current(),
+            parked: AtomicBool::new(false),
+        }
+    }
+
+    fn park(&self) {
+        self.parked.store(true, Ordering::SeqCst);
+        while self.parked.load(Ordering::SeqCst) {
+            std::thread::park();
+        }
+    }
+
+    fn unpark(&self) {
+        self.parked.store(false, Ordering::SeqCst);
+        self.thread.unpark();
+    }
+}
+
+impl ArcWake for ThreadParker {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.unpark();
+    }
+}
+
+/// Block on a future, returning the output.
+///
+/// This will work both within and outside of tokio. Note however that this will
+/// completely block the thread while the future is running, so using this from
+/// within a tokio runtime will block the current thread pool thread.
+///
+/// This should therefore only be used in contexts where blocking is unavoidable,
+/// such as Drop.
+pub fn block_on<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    let parker = Arc::new(ThreadParker::new());
+    let waker = waker_ref(&parker);
+    let mut cx = std::task::Context::from_waker(&waker);
+
+    // Pin the future on the stack
+    tokio::pin!(future);
+
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => parker.park(),
+        }
     }
 }

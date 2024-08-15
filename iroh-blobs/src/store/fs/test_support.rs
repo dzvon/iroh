@@ -18,6 +18,7 @@ use crate::{
     Hash,
 };
 use redb::ReadableTable;
+use tokio::sync::oneshot;
 
 /// The full state of an entry, including the data.
 #[derive(derive_more::Debug)]
