@@ -725,7 +725,7 @@ impl MagicSock {
             if meta.len > meta.stride {
                 trace!(%meta.len, %meta.stride, "GRO datagram received");
             }
-            for datagram in buf.chunks_mut(meta.stride) {
+            for datagram in buf[..meta.len].chunks_mut(meta.stride) {
                 if datagram.len() < meta.stride {
                     trace!(
                         len = %datagram.len(),
