@@ -708,34 +708,38 @@ impl MagicSock {
             Poll::Ready(n) => (n, true),
         };
 
-        #[cfg(not(windows))]
-        let dst_ip = self.normalized_local_addr().ok().map(|addr| addr.ip());
-        // Reasoning for this here: https://github.com/n0-computer/iroh/pull/2595#issuecomment-2290947319
-        #[cfg(windows)]
+        // Note: quinn tries to set the IP address to send *from* to the address something
+        // was received from.  However since we use the QuicMappedAddress this is never the
+        // right address.  Right now we set this to None and let the OS figure out which
+        // address to send from.  At some point the magicsock should store the local UDP
+        // address in the PathState and return it together with the send address.
+        // TODO: this should be set to the QuicMappedAddress???  and the send path should
+        // remove it.
         let dst_ip = None;
 
         let mut quic_packets_total = 0;
 
         for (meta, buf) in metas.iter_mut().zip(bufs.iter_mut()).take(msgs) {
-            let mut start = 0;
             let mut is_quic = false;
             let mut quic_packets_count = 0;
-
-            // find disco and stun packets and forward them to the actor
-            loop {
-                let end = start + meta.stride;
-                if end > meta.len {
-                    break;
+            if meta.len > meta.stride {
+                trace!(%meta.len, %meta.stride, "GRO datagram received");
+            }
+            for datagram in buf.chunks_mut(meta.stride) {
+                if datagram.len() < meta.stride {
+                    trace!(
+                        len = %datagram.len(),
+                        %meta.stride,
+                        "Last GRO datagram smaller than stride",
+                    );
                 }
-                let packet = &buf[start..end];
-                let packet_is_quic = if stun::is(packet) {
-                    trace!(src = %meta.addr, len = %meta.stride, "UDP recv: stun packet");
-                    let packet2 = Bytes::copy_from_slice(packet);
-                    self.net_checker.receive_stun_packet(packet2, meta.addr);
+                let datagram_is_quic = if stun::is(datagram) {
+                    trace!(src = %meta.addr, len = datagram.len(), "UDP recv: stun datagram");
+                    let datagram = Bytes::copy_from_slice(datagram);
+                    self.net_checker.receive_stun_packet(datagram, meta.addr);
                     false
-                } else if let Some((sender, sealed_box)) = disco::source_and_box(packet) {
-                    // Disco?
-                    trace!(src = %meta.addr, len = %meta.stride, "UDP recv: disco packet");
+                } else if let Some((sender, sealed_box)) = disco::source_and_box(datagram) {
+                    trace!(src = %meta.addr, len = datagram.len(), "UDP recv: disco datagram");
                     self.handle_disco_message(
                         sender,
                         sealed_box,
@@ -743,16 +747,16 @@ impl MagicSock {
                     );
                     false
                 } else {
-                    trace!(src = %meta.addr, len = %meta.stride, "UDP recv: quic packet");
+                    trace!(src = %meta.addr, len = datagram.len(), "UDP recv: quic datagram");
                     if from_ipv4 {
-                        inc_by!(MagicsockMetrics, recv_data_ipv4, buf.len() as _);
+                        inc_by!(MagicsockMetrics, recv_data_ipv4, datagram.len() as _);
                     } else {
-                        inc_by!(MagicsockMetrics, recv_data_ipv6, buf.len() as _);
+                        inc_by!(MagicsockMetrics, recv_data_ipv6, datagram.len() as _);
                     }
                     true
                 };
 
-                if packet_is_quic {
+                if datagram_is_quic {
                     quic_packets_count += 1;
                     is_quic = true;
                 } else {
@@ -760,9 +764,8 @@ impl MagicSock {
                     // this makes quinn reliably and quickly ignore the packet as long as
                     // [`quinn::EndpointConfig::grease_quic_bit`] is set to `false`
                     // (which we always do in Endpoint::bind).
-                    buf[start] = 0u8;
+                    datagram[0] = 0u8;
                 }
-                start = end;
             }
 
             if is_quic {
